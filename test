@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+
+set -u
+
+COUNTER_FILE="${MICROCAGE_COUNTER_FILE:-/tmp/microcage-test.counter}"
+FAIL_ON="${MICROCAGE_FAIL_ON:-2}"
+FAIL_CODE="${MICROCAGE_FAIL_CODE:-7}"
+WORK_COUNT="${MICROCAGE_WORK_COUNT:-5000000}"
+
+usage() {
+    cat <<'EOF'
+Usage: microcage-test.sh [options]
+
+Options:
+  --counter-file PATH   Shared iteration counter
+  --fail-on N           Return a failure code on execution N
+  --fail-code CODE      Failure exit code
+  --work-count N        Number of arithmetic-loop iterations
+  --reset               Reset the counter before running
+  --help                Show this help
+
+Environment equivalents:
+  MICROCAGE_COUNTER_FILE
+  MICROCAGE_FAIL_ON
+  MICROCAGE_FAIL_CODE
+  MICROCAGE_WORK_COUNT
+EOF
+}
+
+RESET=0
+
+while (($#)); do
+    case "$1" in
+        --counter-file)
+            COUNTER_FILE="$2"
+            shift 2
+            ;;
+        --fail-on)
+            FAIL_ON="$2"
+            shift 2
+            ;;
+        --fail-code)
+            FAIL_CODE="$2"
+            shift 2
+            ;;
+        --work-count)
+            WORK_COUNT="$2"
+            shift 2
+            ;;
+        --reset)
+            RESET=1
+            shift
+            ;;
+        --help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'Unknown argument: %s\n' "$1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+for value in "$FAIL_ON" "$FAIL_CODE" "$WORK_COUNT"; do
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        printf 'Expected a non-negative integer, got: %s\n' "$value" >&2
+        exit 2
+    fi
+done
+
+if ((RESET)); then
+    rm -f -- "$COUNTER_FILE"
+fi
+
+mkdir -p -- "$(dirname -- "$COUNTER_FILE")"
+
+# flock prevents overlapping test invocations from losing counter updates.
+exec 9>>"$COUNTER_FILE"
+flock 9
+
+iteration=0
+if [[ -s "$COUNTER_FILE" ]]; then
+    read -r iteration <"$COUNTER_FILE"
+fi
+
+iteration=$((iteration + 1))
+printf '%d\n' "$iteration" >"$COUNTER_FILE"
+
+flock -u 9
+
+printf 'test iteration: %d\n' "$iteration"
+printf 'pid: %d\n' "$$"
+printf 'architecture: %s\n' "$(uname -m)"
+printf 'timestamp: %(%Y-%m-%d %H:%M:%S %z)T\n' -1
+
+if [[ -r /proc/self/status ]]; then
+    grep -E '^(Cpus_allowed_list|Mems_allowed_list):' /proc/self/status
+fi
+
+printf 'stderr marker for iteration %d\n' "$iteration" >&2
+
+# CPU-bound work so taskset/perf behavior is visible.
+result=0
+for ((i = 0; i < WORK_COUNT; i++)); do
+    result=$(((result * 33 + i) & 0x7fffffff))
+done
+
+printf 'work result: %d\n' "$result"
+
+if ((iteration == FAIL_ON)); then
+    printf 'intentional failure on iteration %d\n' "$iteration" >&2
+    exit "$FAIL_CODE"
+fi
+
+printf 'iteration %d completed successfully\n' "$iteration"
